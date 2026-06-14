@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+*.env
+serviceAccountKey.json
+firebase-adminsdk*.json
+requests.json
+.firebase/
+firebase-debug.log
+*.log
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
