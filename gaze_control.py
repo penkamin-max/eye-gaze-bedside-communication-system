@@ -29,6 +29,12 @@ START screen:
 Main screen:
 - LEFT  = send current patient request
 - RIGHT = next request
+
+Hands-free exit:
+- Navigate RIGHT until the STOP SYSTEM page appears.
+- Look LEFT to open the exit-confirmation screen.
+- Look LEFT again and hold 2.50s to close the program.
+- Look RIGHT to cancel and return to the request menu.
 """
 
 import cv2
@@ -75,6 +81,7 @@ CANVAS_H = 720
 
 START_DWELL_TIME_SECONDS = 1.36
 PAGE_DWELL_TIME_SECONDS = 1.36
+EXIT_CONFIRM_DWELL_TIME_SECONDS = 2.50
 ACTION_COOLDOWN = 1.8
 
 SMOOTH_WINDOW = 10
@@ -142,6 +149,20 @@ REQUEST_PAGES = [
         "icon": "uncomfortable",
     },
 ]
+
+
+EXIT_PAGE = {
+    "name": "Stop System",
+    "subtitle": "Hands-free exit",
+    "priority": "System",
+    "icon": "stop",
+    "action": "EXIT",
+}
+
+
+# Six care requests are preserved. EXIT_PAGE is a system-control page,
+# not a patient assistance request and is never uploaded to Firebase.
+NAVIGATION_PAGES = REQUEST_PAGES + [EXIT_PAGE]
 
 
 PRIORITY_MAP = {
@@ -212,6 +233,7 @@ COLOR_GRAY = (120, 120, 120)
 PRIORITY_COLOR_MAP = {
     "High": COLOR_RED,
     "Low": COLOR_BLUE,
+    "System": COLOR_RED,
 }
 
 
@@ -374,6 +396,11 @@ def get_left_button_rect():
 
 def get_next_button_rect():
     return 690, 210, 1200, 560
+
+
+def get_quit_button_rect():
+    """Get quit button rect in top-left corner."""
+    return 10, 10, 110, 80
 
 
 def point_in_rect(px, py, rect, padding=35):
@@ -574,6 +601,30 @@ def draw_icon_next(img, cx, cy, size, color):
     cv2.line(img, (cx + size + 10, cy - size), (cx + size + 10, cy + size), color, 8)
 
 
+def draw_icon_stop(img, cx, cy, size, color):
+    """Draw a simple stop symbol for the hands-free exit page."""
+    pts = np.array([
+        [cx - size // 2, cy - size],
+        [cx + size // 2, cy - size],
+        [cx + size, cy - size // 2],
+        [cx + size, cy + size // 2],
+        [cx + size // 2, cy + size],
+        [cx - size // 2, cy + size],
+        [cx - size, cy + size // 2],
+        [cx - size, cy - size // 2],
+    ], np.int32)
+    cv2.polylines(img, [pts], True, color, 4)
+    cv2.putText(
+        img,
+        "STOP",
+        (cx - 52, cy + 13),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.9,
+        color,
+        3,
+    )
+
+
 def draw_icon(img, icon, cx, cy, size, color):
     if icon == "nurse":
         draw_icon_nurse(img, cx, cy, size, color)
@@ -587,6 +638,54 @@ def draw_icon(img, icon, cx, cy, size, color):
         draw_icon_restroom(img, cx, cy, size, color)
     elif icon == "uncomfortable":
         draw_icon_uncomfortable(img, cx, cy, size, color)
+    elif icon == "stop":
+        draw_icon_stop(img, cx, cy, size, color)
+
+
+def draw_quit_button_overlay(img, active=False, dwell_progress=0.0):
+    """Draw quit button overlay in top-left corner."""
+    x1, y1, x2, y2 = get_quit_button_rect()
+    
+    # Button background
+    if active:
+        fill_color = (100, 150, 255)  # Sáng hơn khi active
+    else:
+        fill_color = COLOR_PANEL
+    cv2.rectangle(img, (x1, y1), (x2, y2), fill_color, -1)
+    
+    # Button border with glow effect
+    if active:
+        border_color = COLOR_YELLOW
+        # Glow effect - vẽ border ngoài
+        cv2.rectangle(img, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), COLOR_YELLOW, 1)
+    else:
+        border_color = COLOR_CYAN
+    
+    cv2.rectangle(img, (x1, y1), (x2, y2), border_color, 3)
+    
+    # Button text
+    text_color = COLOR_YELLOW if active else COLOR_CYAN
+    cv2.putText(
+        img,
+        "QUIT",
+        (x1 + 15, y1 + 45),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.85,
+        text_color,
+        2,
+    )
+    
+    # Progress bar if active
+    if active and dwell_progress > 0:
+        bar_height = 4
+        fill_w = int((x2 - x1) * clamp(dwell_progress, 0.0, 1.0))
+        cv2.rectangle(
+            img,
+            (x1, y2 - bar_height),
+            (x1 + fill_w, y2),
+            COLOR_GREEN,
+            -1
+        )
 
 
 # ============================================================
@@ -851,6 +950,8 @@ class PatientGazeApp:
         self.last_status_poll_time = 0.0
         self.status_poll_interval = 1.0
 
+        self.exit_requested = False
+
     def reset_dwell(self):
         self.hover_id = None
         self.hover_start_time = None
@@ -922,6 +1023,13 @@ class PatientGazeApp:
         except Exception as e:
             print("[STATUS POLL ERROR]", e)
 
+    def get_quit_button_hover(self, cursor_x, cursor_y):
+        """Check if gaze is on quit button."""
+        quit_rect = get_quit_button_rect()
+        if point_in_rect(cursor_x, cursor_y, quit_rect, padding=15):
+            return "QUIT"
+        return None
+
     def get_start_hover(self, cursor_x, cursor_y):
         cx, cy, r = get_start_circle()
 
@@ -950,9 +1058,30 @@ class PatientGazeApp:
 
         return None
 
+    def get_exit_confirm_hover(self, cursor_x, cursor_y):
+        """Map gaze to the two choices on the exit-confirmation screen."""
+        left_rect = get_left_button_rect()
+        right_rect = get_next_button_rect()
+
+        if point_in_rect(cursor_x, cursor_y, left_rect, padding=55):
+            return "CONFIRM_EXIT"
+
+        if point_in_rect(cursor_x, cursor_y, right_rect, padding=55):
+            return "CANCEL_EXIT"
+
+        z = self.controller.stable_zone
+
+        if z in ["LEFT_TOP", "LEFT_BOTTOM"]:
+            return "CONFIRM_EXIT"
+
+        if z in ["RIGHT_TOP", "RIGHT_BOTTOM"]:
+            return "CANCEL_EXIT"
+
+        return None
+
     def draw_debug(self, canvas):
         c = self.controller
-        current_request = REQUEST_PAGES[self.page_index]["name"]
+        current_request = NAVIGATION_PAGES[self.page_index]["name"]
 
         firebase_status = "ON" if FIREBASE_AVAILABLE else "OFF"
 
@@ -965,7 +1094,7 @@ class PatientGazeApp:
             f"HEAD: {c.head_status}",
             f"FACE: {'YES' if c.face_detected else 'NO'}",
             f"CAM: {CAMERA_INDEX} ({c.frame_w}x{c.frame_h})",
-            f"PAGE: {self.page_index + 1}/{len(REQUEST_PAGES)} {current_request}",
+            f"PAGE: {self.page_index + 1}/{len(NAVIGATION_PAGES)} {current_request}",
             f"DWELL: {self.active_dwell_time:.2f}s",
             f"INV_X: {c.invert_x}  INV_Y: {c.invert_y}",
             f"FIREBASE: {firebase_status}",
@@ -1093,26 +1222,42 @@ class PatientGazeApp:
 
         self.draw_debug(canvas)
         self.draw_mini_preview(canvas)
+        
+        # Draw quit button
+        quit_hovered = self.hover_id == "QUIT"
+        quit_progress = dwell_progress if quit_hovered else 0.0
+        draw_quit_button_overlay(canvas, active=quit_hovered, dwell_progress=quit_progress)
+        
+        # Draw gaze cursor on top
         draw_gaze_cursor(canvas, cursor_x, cursor_y, self.controller.face_detected)
 
     def draw_page(self, canvas, cursor_x, cursor_y, hover_id, dwell_progress):
         draw_grid_bg(canvas)
 
-        request = REQUEST_PAGES[self.page_index]
+        request = NAVIGATION_PAGES[self.page_index]
+        is_exit_page = request.get("action") == "EXIT"
         request_color = PRIORITY_COLOR_MAP.get(request["priority"], COLOR_BLUE)
 
         draw_centered_text(
             canvas,
-            f"REQUEST {self.page_index + 1}/{len(REQUEST_PAGES)}",
+            (
+                "SYSTEM CONTROL"
+                if is_exit_page
+                else f"REQUEST {self.page_index + 1}/{len(REQUEST_PAGES)}"
+            ),
             60,
             1.1,
-            COLOR_CYAN,
+            COLOR_RED if is_exit_page else COLOR_CYAN,
             3
         )
 
         draw_centered_text(
             canvas,
-            "LOOK LEFT TO SEND REQUEST  |  LOOK RIGHT FOR NEXT",
+            (
+                "LOOK LEFT TO OPEN EXIT CONFIRMATION  |  LOOK RIGHT TO CONTINUE"
+                if is_exit_page
+                else "LOOK LEFT TO SEND REQUEST  |  LOOK RIGHT FOR NEXT"
+            ),
             105,
             0.75,
             COLOR_MAGENTA,
@@ -1164,10 +1309,14 @@ class PatientGazeApp:
 
         cv2.putText(
             canvas,
-            f"PRIORITY: {request['priority'].upper()}",
-            (x1 + 105, y1 + 310),
+            (
+                "HANDS-FREE SYSTEM EXIT"
+                if is_exit_page
+                else f"PRIORITY: {request['priority'].upper()}"
+            ),
+            (x1 + (55 if is_exit_page else 105), y1 + 310),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.75,
+            0.68 if is_exit_page else 0.75,
             request_color,
             2,
         )
@@ -1197,7 +1346,9 @@ class PatientGazeApp:
             4,
         )
 
-        next_request = REQUEST_PAGES[(self.page_index + 1) % len(REQUEST_PAGES)]["name"]
+        next_request = NAVIGATION_PAGES[
+            (self.page_index + 1) % len(NAVIGATION_PAGES)
+        ]["name"]
 
         next_scale = 0.75
         if len(next_request) > 20:
@@ -1218,7 +1369,7 @@ class PatientGazeApp:
 
         cv2.putText(
             canvas,
-            "Q Quit | P Pause | R Reset | D Clear | E Emergency | W Water | N Nurse",
+            "Hands-free stop: navigate to STOP SYSTEM | Q Quit | P Pause | R Reset",
             (35, CANVAS_H - 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
@@ -1228,6 +1379,13 @@ class PatientGazeApp:
 
         self.draw_debug(canvas)
         self.draw_mini_preview(canvas)
+        
+        # Draw quit button
+        quit_hovered = hover_id == "QUIT"
+        quit_progress = dwell_progress if quit_hovered else 0.0
+        draw_quit_button_overlay(canvas, active=quit_hovered, dwell_progress=quit_progress)
+        
+        # Draw gaze cursor on top
         draw_gaze_cursor(canvas, cursor_x, cursor_y, self.controller.face_detected)
 
     def draw_confirmation(self, canvas, cursor_x, cursor_y):
@@ -1335,6 +1493,131 @@ class PatientGazeApp:
 
         self.draw_debug(canvas)
         self.draw_mini_preview(canvas)
+        
+        # Draw quit button
+        draw_quit_button_overlay(canvas, active=False, dwell_progress=0.0)
+        
+        # Draw gaze cursor on top
+        draw_gaze_cursor(canvas, cursor_x, cursor_y, self.controller.face_detected)
+
+    def draw_exit_confirmation(
+        self,
+        canvas,
+        cursor_x,
+        cursor_y,
+        hover_id,
+        dwell_progress,
+    ):
+        """Draw a two-step, gaze-only exit confirmation screen."""
+        draw_grid_bg(canvas)
+
+        draw_centered_text(
+            canvas,
+            "STOP THE SYSTEM?",
+            90,
+            1.8,
+            COLOR_RED,
+            4,
+        )
+
+        draw_centered_text(
+            canvas,
+            "A longer dwell is required to prevent accidental exit",
+            135,
+            0.7,
+            COLOR_WHITE,
+            2,
+        )
+
+        left_rect = get_left_button_rect()
+        right_rect = get_next_button_rect()
+
+        left_active = hover_id == "CONFIRM_EXIT"
+        right_active = hover_id == "CANCEL_EXIT"
+
+        draw_glow_rect(canvas, left_rect, COLOR_RED, active=left_active)
+        draw_glow_rect(canvas, right_rect, COLOR_CYAN, active=right_active)
+
+        lx1, ly1, lx2, ly2 = left_rect
+        rx1, ry1, rx2, ry2 = right_rect
+
+        draw_icon_stop(
+            canvas,
+            (lx1 + lx2) // 2,
+            ly1 + 110,
+            55,
+            COLOR_RED,
+        )
+
+        cv2.putText(
+            canvas,
+            "YES - EXIT",
+            (lx1 + 105, ly1 + 245),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.45,
+            COLOR_YELLOW if left_active else COLOR_WHITE,
+            4,
+        )
+
+        cv2.putText(
+            canvas,
+            f"Hold LEFT for {EXIT_CONFIRM_DWELL_TIME_SECONDS:.2f} seconds",
+            (lx1 + 45, ly1 + 305),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            COLOR_RED,
+            2,
+        )
+
+        draw_icon_next(
+            canvas,
+            (rx1 + rx2) // 2 - 20,
+            ry1 + 115,
+            55,
+            COLOR_CYAN,
+        )
+
+        cv2.putText(
+            canvas,
+            "CANCEL",
+            (rx1 + 145, ry1 + 245),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.45,
+            COLOR_YELLOW if right_active else COLOR_WHITE,
+            4,
+        )
+
+        cv2.putText(
+            canvas,
+            "Look RIGHT to return to the request menu",
+            (rx1 + 45, ry1 + 305),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            COLOR_CYAN,
+            2,
+        )
+
+        if left_active:
+            draw_progress_bar(canvas, left_rect, dwell_progress, COLOR_RED)
+        elif right_active:
+            draw_progress_bar(canvas, right_rect, dwell_progress, COLOR_GREEN)
+
+        draw_centered_text(
+            canvas,
+            "LEFT = close program  |  RIGHT = cancel",
+            CANVAS_H - 50,
+            0.72,
+            COLOR_CYAN,
+            2,
+        )
+
+        self.draw_debug(canvas)
+        self.draw_mini_preview(canvas)
+        
+        # Draw quit button
+        draw_quit_button_overlay(canvas, active=False, dwell_progress=0.0)
+        
+        # Draw gaze cursor on top
         draw_gaze_cursor(canvas, cursor_x, cursor_y, self.controller.face_detected)
 
     def send_backup_request_by_key(self, request_type):
@@ -1366,6 +1649,7 @@ class PatientGazeApp:
         print("Local backup file:", REQUESTS_FILE)
         print("Q=quit | P=pause | R=reset | F=fullscreen | X/Y=invert cursor | C=recalibrate")
         print("Backup keys: D=Clear current request | E=Emergency | W=Water | N=Call Nurse")
+        print("Hands-free exit: navigate to STOP SYSTEM, look LEFT, then confirm LEFT for 2.50s")
 
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 
@@ -1397,19 +1681,61 @@ class PatientGazeApp:
             canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
 
             if self.state == "START":
-                start_target = self.get_start_hover(cursor_x, cursor_y)
+                quit_target = self.get_quit_button_hover(cursor_x, cursor_y)
+                start_target = self.get_start_hover(cursor_x, cursor_y) if quit_target is None else None
+                
+                dwell_target = quit_target if quit_target else start_target
+                dwell_time = 1.0 if quit_target else START_DWELL_TIME_SECONDS
+                
                 dwell_progress, activated = self.update_dwell(
-                    start_target,
-                    START_DWELL_TIME_SECONDS
+                    dwell_target,
+                    dwell_time
                 )
 
                 if activated:
-                    self.controller.calibrate_center()
-                    self.state = "PAGE"
-                    self.reset_dwell()
-                    print("Entered request menu.")
+                    if quit_target == "QUIT":
+                        self.exit_requested = True
+                        print("[QUIT BUTTON] Exit confirmed.")
+                    else:
+                        self.controller.calibrate_center()
+                        self.state = "PAGE"
+                        self.reset_dwell()
+                        print("Entered request menu.")
 
                 self.draw_start(canvas, cursor_x, cursor_y, dwell_progress)
+
+            elif self.state == "EXIT_CONFIRM":
+                quit_target = self.get_quit_button_hover(cursor_x, cursor_y)
+                exit_hover = self.get_exit_confirm_hover(cursor_x, cursor_y) if quit_target is None else None
+                
+                dwell_target = quit_target if quit_target else exit_hover
+                dwell_time = 1.0 if quit_target else EXIT_CONFIRM_DWELL_TIME_SECONDS
+                
+                dwell_progress, activated = self.update_dwell(
+                    dwell_target,
+                    dwell_time,
+                )
+
+                if activated:
+                    if quit_target == "QUIT":
+                        self.exit_requested = True
+                        print("[QUIT BUTTON] Exit confirmed.")
+                    elif exit_hover == "CONFIRM_EXIT":
+                        self.exit_requested = True
+                        print("[HANDS-FREE EXIT] Exit confirmed by gaze.")
+
+                    elif exit_hover == "CANCEL_EXIT":
+                        self.state = "PAGE"
+                        self.reset_dwell()
+                        print("[HANDS-FREE EXIT] Exit cancelled.")
+
+                self.draw_exit_confirmation(
+                    canvas,
+                    cursor_x,
+                    cursor_y,
+                    exit_hover,
+                    dwell_progress,
+                )
 
             elif self.state == "CONFIRM":
                 self.poll_patient_feedback_status()
@@ -1424,26 +1750,43 @@ class PatientGazeApp:
                         self.reset_dwell()
 
             else:
-                hover_id = self.get_page_hover(cursor_x, cursor_y)
+                quit_target = self.get_quit_button_hover(cursor_x, cursor_y)
+                page_hover = self.get_page_hover(cursor_x, cursor_y) if quit_target is None else None
+                
+                dwell_target = quit_target if quit_target else page_hover
+                dwell_time = 1.0 if quit_target else PAGE_DWELL_TIME_SECONDS
+                
                 dwell_progress, activated = self.update_dwell(
-                    hover_id,
-                    PAGE_DWELL_TIME_SECONDS
+                    dwell_target,
+                    dwell_time
                 )
 
                 if activated:
-                    if hover_id == "SEND_REQUEST":
+                    if quit_target == "QUIT":
+                        self.exit_requested = True
+                        print("[QUIT BUTTON] Exit confirmed.")
+                    elif page_hover == "SEND_REQUEST":
                         if self.can_send():
-                            request = REQUEST_PAGES[self.page_index]
+                            request = NAVIGATION_PAGES[self.page_index]
 
-                            sent = send_patient_request(request["name"])
-                            self.register_sent_request(sent)
+                            if request.get("action") == "EXIT":
+                                self.state = "EXIT_CONFIRM"
+                                self.reset_dwell()
+                                print("Opened hands-free exit confirmation.")
+                            else:
+                                sent = send_patient_request(request["name"])
+                                self.register_sent_request(sent)
 
-                    elif hover_id == "NEXT":
-                        self.page_index = (self.page_index + 1) % len(REQUEST_PAGES)
-                        print(f"Next request: {REQUEST_PAGES[self.page_index]['name']}")
+                    elif page_hover == "NEXT":
+                        self.page_index = (
+                            self.page_index + 1
+                        ) % len(NAVIGATION_PAGES)
+                        print(
+                            f"Next page: {NAVIGATION_PAGES[self.page_index]['name']}"
+                        )
                         self.reset_dwell()
 
-                self.draw_page(canvas, cursor_x, cursor_y, hover_id, dwell_progress)
+                self.draw_page(canvas, cursor_x, cursor_y, page_hover, dwell_progress)
 
             if self.paused:
                 cv2.putText(
@@ -1457,6 +1800,9 @@ class PatientGazeApp:
                 )
 
             cv2.imshow(WINDOW_NAME, canvas)
+
+            if self.exit_requested:
+                break
 
             key = cv2.waitKey(1) & 0xFF
 
@@ -1475,6 +1821,7 @@ class PatientGazeApp:
                 self.last_sent_request_id = None
                 self.patient_feedback_status = "Pending"
                 self.confirm_screen_start = None
+                self.exit_requested = False
                 self.reset_dwell()
                 print("Reset to START.")
 
