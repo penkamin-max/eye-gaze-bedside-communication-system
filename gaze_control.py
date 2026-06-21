@@ -24,7 +24,7 @@ N = send Call Nurse
 
 Interaction:
 START screen:
-- Look at START and hold 1.36s
+- Look at START and hold 1.30s
 
 Main screen:
 - LEFT  = send current patient request
@@ -79,8 +79,8 @@ CAMERA_INDEX = 0
 CANVAS_W = 1280
 CANVAS_H = 720
 
-START_DWELL_TIME_SECONDS = 1.36
-PAGE_DWELL_TIME_SECONDS = 1.36
+START_DWELL_TIME_SECONDS = 1.30
+PAGE_DWELL_TIME_SECONDS = 1.30
 EXIT_CONFIRM_DWELL_TIME_SECONDS = 2.50
 ACTION_COOLDOWN = 1.8
 
@@ -1204,7 +1204,7 @@ class PatientGazeApp:
 
         draw_centered_text(
             canvas,
-            "Look at START and hold 1.36 seconds",
+            "Look at START and hold 1.30 seconds",
             CANVAS_H - 95,
             0.75,
             COLOR_CYAN,
